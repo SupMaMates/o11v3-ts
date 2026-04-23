@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Ensure the script is run with bash
+# Ensure script is run with bash
 if [ -z "${BASH_VERSION:-}" ]; then
   echo "Please run with bash: sudo bash install.sh"
   exit 1
 fi
 
-# Ensure the script is run as root
+# Ensure script is run as root
 if [ "${EUID}" -ne 0 ]; then
   echo "Please run as root (e.g., sudo bash install.sh)"
   exit 1
 fi
 
-# Ensure we have an interactive terminal for prompts
+# Ensure interactive terminal exists
 if [ ! -r /dev/tty ]; then
   echo "No interactive terminal found. Run this script from a normal SSH terminal."
   exit 1
@@ -44,13 +44,15 @@ echo "    o11 & Multiplexer Proxy Installer   "
 echo "========================================"
 echo ""
 
-# Ask user for inputs with defaults
+# Prompts
 prompt_default "Enter o11 backend port" "2086" O11_PORT
-prompt_default "Enter Multiplexer Proxy port" "8080" PROXY_PORT
+prompt_default "Enter Multiplexer Proxy listen port" "8080" PROXY_PORT
+prompt_default "Enter Multiplexer Proxy listen host" "0.0.0.0" LISTEN_HOST
+prompt_default "Enter upstream o11 host:port for proxy" "127.0.0.1:${O11_PORT}" O11_UPSTREAM
 prompt_default "Enter Admin Username" "admin" ADMIN_USER
 prompt_secret_default "Enter Admin Password" "admin" ADMIN_PASS
 
-# Hash the password in SHA-256
+# Hash password
 HASHED_PASS="$(printf '%s' "$ADMIN_PASS" | sha256sum | awk '{print $1}')"
 
 echo ""
@@ -90,34 +92,64 @@ cat <<EOF > /home/o11/o11.cfg
 EOF
 
 echo "Creating proxy.js..."
-cat <<'EOF' > /home/o11/proxy.js
+cat <<EOF > /home/o11/proxy.js
 const http = require('http');
 const { spawn } = require('child_process');
 
-const PROXY_PORT = process.env.PROXY_PORT || 8080;
-const O11_HOST = process.env.O11_HOST || '127.0.0.1:2086';
+/*
+  All runtime config is stored directly in this file
+  (no Environment= values in systemd service).
+*/
+const PROXY_PORT = ${PROXY_PORT};
+const LISTEN_HOST = '${LISTEN_HOST}';
+const O11_HOST = '${O11_UPSTREAM}';
 
 const activeStreams = new Map();
+
+function buildTarget(reqUrl, hostHeader) {
+  const urlObj = new URL(reqUrl, \`http://\${hostHeader}\`);
+  const path = urlObj.pathname;
+
+  // New format:
+  // /stream/<provider>/<channel>/master.ts?...
+  const newFmt = path.match(/^\\/stream\\/([^/]+)\\/([^/]+)\\/master\\.ts$/);
+  if (newFmt) {
+    const provider = newFmt[1];
+    const channel = newFmt[2];
+    const key = \`stream/\${provider}/\${channel}\`;
+    const targetM3u8 = \`http://\${O11_HOST}/stream/\${provider}/\${channel}/master.m3u8\${urlObj.search}\`;
+    return { key, targetM3u8 };
+  }
+
+  // Old format (backward compatibility):
+  // /<anything>/<channel>.ts?...
+  const oldFmt = path.match(/^\\/[^/]+\\/([^/]+)\\.ts$/);
+  if (oldFmt) {
+    const channelName = oldFmt[1];
+    const key = \`legacy/\${channelName}\`;
+    const targetM3u8 = \`http://\${O11_HOST}/stream/\${channelName}/tspls/master.m3u8\${urlObj.search}\`;
+    return { key, targetM3u8 };
+  }
+
+  return null;
+}
 
 const server = http.createServer((req, res) => {
   if (req.url === '/favicon.ico') return res.end();
 
-  let channelName = '';
+  let streamKey = '';
   let targetM3u8 = '';
 
   try {
-    const urlObj = new URL(req.url, `http://${req.headers.host}`);
-    const pathParts = urlObj.pathname.split('/');
-
-    if (pathParts.length === 3 && pathParts[2].endsWith('.ts')) {
-      channelName = pathParts[2].replace('.ts', '');
-      targetM3u8 = `http://${O11_HOST}/stream/${channelName}/tspls/master.m3u8${urlObj.search}`;
-    } else {
-      res.writeHead(404);
-      return res.end('Invalid format.');
+    const parsed = buildTarget(req.url, req.headers.host);
+    if (!parsed) {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      return res.end('Invalid format. Use /stream/<provider>/<channel>/master.ts?...');
     }
+    streamKey = parsed.key;
+    targetM3u8 = parsed.targetM3u8;
   } catch (e) {
-    res.writeHead(400);
+    res.writeHead(400, { 'Content-Type': 'text/plain' });
     return res.end('Bad request');
   }
 
@@ -128,10 +160,10 @@ const server = http.createServer((req, res) => {
     'Access-Control-Allow-Origin': '*'
   });
 
-  let streamState = activeStreams.get(channelName);
+  let streamState = activeStreams.get(streamKey);
 
   if (!streamState) {
-    console.log(`[?] First viewer for [${channelName}]. Waking up o11...`);
+    console.log(\`[?] First viewer for [\${streamKey}]. Waking up o11...\`);
 
     const ffmpeg = spawn('ffmpeg', [
       '-hide_banner', '-loglevel', 'error',
@@ -151,7 +183,7 @@ const server = http.createServer((req, res) => {
       ffmpeg,
       clients: new Set()
     };
-    activeStreams.set(channelName, streamState);
+    activeStreams.set(streamKey, streamState);
 
     ffmpeg.stdout.on('data', (chunk) => {
       for (const client of streamState.clients) {
@@ -160,18 +192,18 @@ const server = http.createServer((req, res) => {
     });
 
     ffmpeg.stderr.on('data', (data) => {
-      console.error(`[FFmpeg Error - ${channelName}]: ${data}`);
+      console.error(\`[FFmpeg Error - \${streamKey}]: \${data}\`);
     });
 
     ffmpeg.on('close', () => {
-      console.log(`[?] FFmpeg closed for [${channelName}].`);
-      activeStreams.delete(channelName);
+      console.log(\`[?] FFmpeg closed for [\${streamKey}].\`);
+      activeStreams.delete(streamKey);
       for (const client of streamState.clients) {
         client.end();
       }
     });
   } else {
-    console.log(`[+] Additional viewer joined [${channelName}]. Total: ${streamState.clients.size + 1}`);
+    console.log(\`[+] Additional viewer joined [\${streamKey}]. Total: \${streamState.clients.size + 1}\`);
   }
 
   streamState.clients.add(res);
@@ -179,19 +211,19 @@ const server = http.createServer((req, res) => {
   req.on('close', () => {
     if (streamState && streamState.clients.has(res)) {
       streamState.clients.delete(res);
-      console.log(`[-] Viewer left [${channelName}]. Remaining: ${streamState.clients.size}`);
+      console.log(\`[-] Viewer left [\${streamKey}]. Remaining: \${streamState.clients.size}\`);
 
       if (streamState.clients.size === 0) {
-        console.log(`[zzz] Room empty for [${channelName}]. Killing FFmpeg to let o11 sleep.`);
+        console.log(\`[zzz] Room empty for [\${streamKey}]. Killing FFmpeg to let o11 sleep.\`);
         streamState.ffmpeg.kill('SIGKILL');
-        activeStreams.delete(channelName);
+        activeStreams.delete(streamKey);
       }
     }
   });
 });
 
 const cleanupAndExit = () => {
-  console.log('\n[!] Shutting down proxy. Cleaning up FFmpeg processes...');
+  console.log('\\n[!] Shutting down proxy. Cleaning up FFmpeg processes...');
   for (const [, state] of activeStreams.entries()) {
     state.ffmpeg.kill('SIGKILL');
   }
@@ -205,9 +237,9 @@ process.on('uncaughtException', (err) => {
   cleanupAndExit();
 });
 
-server.listen(PROXY_PORT, () => {
-  console.log(`[?] MULTIPLEXER Proxy running on port ${PROXY_PORT}`);
-  console.log(`[?] Forwarding requests to o11 backend on ${O11_HOST}`);
+server.listen(PROXY_PORT, LISTEN_HOST, () => {
+  console.log(\`[?] MULTIPLEXER Proxy running on \${LISTEN_HOST}:\${PROXY_PORT}\`);
+  console.log(\`[?] Forwarding requests to o11 backend on \${O11_HOST}\`);
 });
 EOF
 
@@ -246,8 +278,6 @@ Type=simple
 User=root
 Group=root
 WorkingDirectory=/home/o11
-Environment=PROXY_PORT=${PROXY_PORT}
-Environment=O11_HOST=127.0.0.1:${O11_PORT}
 ExecStart=/usr/bin/node /home/o11/proxy.js
 Restart=on-failure
 RestartSec=3
@@ -265,10 +295,11 @@ echo ""
 echo "=========================================================="
 echo " Setup completed successfully!"
 echo "=========================================================="
-echo " o11 Backend is running on port:  ${O11_PORT}"
-echo " Multiplexer Proxy is running on: ${PROXY_PORT}"
-echo " Admin Username:                  ${ADMIN_USER}"
-echo " Admin Password:                  (Hashed securely in /home/o11/o11.cfg)"
+echo " o11 Backend port:                 ${O11_PORT}"
+echo " Proxy listen:                     ${LISTEN_HOST}:${PROXY_PORT}"
+echo " Proxy upstream o11 target:        ${O11_UPSTREAM}"
+echo " Admin Username:                   ${ADMIN_USER}"
+echo " Admin Password:                   (Hashed in /home/o11/o11.cfg)"
 echo ""
 echo " Check o11 status:    sudo systemctl status o11"
 echo " Check Proxy status:  sudo systemctl status o11-proxy"
