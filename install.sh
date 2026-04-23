@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Ensure the script is run as root
-if [ "$EUID" -ne 0 ]; then
+if[ "$EUID" -ne 0 ]; then
   echo "Please run as root (e.g., sudo bash install.sh)"
   exit 1
 fi
@@ -11,17 +11,17 @@ echo "    o11 & Multiplexer Proxy Installer   "
 echo "========================================"
 echo ""
 
-# 1. Ask user for inputs with defaults
-read -p "Enter o11 backend port [default: 2086]: " O11_PORT
+# 1. Ask user for inputs with defaults (Reading explicitly from /dev/tty to survive curl | bash)
+read -p "Enter o11 backend port[default: 2086]: " O11_PORT < /dev/tty
 O11_PORT=${O11_PORT:-2086}
 
-read -p "Enter Multiplexer Proxy port [default: 8080]: " PROXY_PORT
+read -p "Enter Multiplexer Proxy port[default: 8080]: " PROXY_PORT < /dev/tty
 PROXY_PORT=${PROXY_PORT:-8080}
 
-read -p "Enter Admin Username[default: admin]: " ADMIN_USER
+read -p "Enter Admin Username [default: admin]: " ADMIN_USER < /dev/tty
 ADMIN_USER=${ADMIN_USER:-admin}
 
-read -p "Enter Admin Password [default: admin]: " -s ADMIN_PASS
+read -s -p "Enter Admin Password [default: admin]: " ADMIN_PASS < /dev/tty
 echo ""
 ADMIN_PASS=${ADMIN_PASS:-admin}
 
@@ -108,7 +108,7 @@ const server = http.createServer((req, res) => {
     let streamState = activeStreams.get(channelName);
 
     if (!streamState) {
-        console.log(`[?] First viewer for [${channelName}]. Waking up o11...`);
+        console.log(`[?] First viewer for[${channelName}]. Waking up o11...`);
 
         const ffmpeg = spawn('ffmpeg',[
             '-hide_banner', '-loglevel', 'error',
@@ -148,7 +148,7 @@ const server = http.createServer((req, res) => {
             }
         });
     } else {
-        console.log(`[+] Additional viewer joined [${channelName}]. Total: ${streamState.clients.size + 1}`);
+        console.log(`[+] Additional viewer joined[${channelName}]. Total: ${streamState.clients.size + 1}`);
     }
 
     streamState.clients.add(res);
@@ -213,8 +213,7 @@ LimitNPROC=infinity
 WantedBy=multi-user.target
 EOF
 
-cat <<EOF | sudo tee /etc/systemd/system/o11-proxy.service > /dev/null
-[Unit]
+cat <<EOF | sudo tee /etc/systemd/system/o11-proxy.service > /dev/null[Unit]
 Description=o11 Multiplexer Node Proxy
 After=o11.service
 
@@ -250,7 +249,7 @@ echo "=========================================================="
 echo " o11 Backend is running on port:  ${O11_PORT}"
 echo " Multiplexer Proxy is running on: ${PROXY_PORT}"
 echo " Admin Username:                  ${ADMIN_USER}"
-echo " Admin Password:                  (Hashed securely)"
+echo " Admin Password:                  (Hashed securely in /home/o11/o11.cfg)"
 echo ""
 echo " Check o11 status:    sudo systemctl status o11"
 echo " Check Proxy status:  sudo systemctl status o11-proxy"
