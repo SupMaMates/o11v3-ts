@@ -19,6 +19,8 @@ http://SERVER_IP:2400/stream/PROVIDER/CHANNEL/master.ts?u=USERNAME&p=PASSWORD_HA
 ```
 
 * Reuses one FFmpeg process per active stream and shares it between viewers
+* Remuxes O11 HLS to clean MPEG-TS without transcoding
+* Regenerates timestamps and resends MPEG-TS headers for stricter restream panels
 * Stops FFmpeg when the last viewer disconnects
 * Health and status endpoints:
 
@@ -53,6 +55,8 @@ LISTEN_HOST=0.0.0.0 \
 O11_UPSTREAM=127.0.0.1:2086 \
 ADMIN_USER=szarkic \
 ADMIN_PASS='your-password' \
+FFMPEG_PROBESIZE=5000000 \
+FFMPEG_ANALYZEDURATION=10000000 \
 bash /root/o11v3-ts-install.sh
 ```
 
@@ -74,6 +78,19 @@ Rule:
 
 ```text
 :2086/stream/PROVIDER/CHANNEL/master.m3u8?... -> :2400/stream/PROVIDER/CHANNEL?...
+```
+
+The proxy still pulls the O11 HLS playlist internally, then FFmpeg remuxes it into MPEG-TS with stream copy. It does not transcode video or audio.
+
+Default remux settings are tuned for XUI-style TS ingest:
+
+```text
+Generate timestamps: yes
+Preserve source timestamps: no
+Probe size: 5000000
+Analyze duration: 10000000
+PAT/PMT resend: yes
+Video extra data on keyframes: yes
 ```
 
 ## Service Commands

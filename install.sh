@@ -22,6 +22,9 @@ V3P_ZIP_SHA256="${V3P_ZIP_SHA256:-}"
 MAX_CLIENTS="${MAX_CLIENTS:-0}"
 CLIENT_BUFFER_LIMIT="${CLIENT_BUFFER_LIMIT:-8388608}"
 FFMPEG_LOGLEVEL="${FFMPEG_LOGLEVEL:-warning}"
+FFMPEG_PROBESIZE="${FFMPEG_PROBESIZE:-5000000}"
+FFMPEG_ANALYZEDURATION="${FFMPEG_ANALYZEDURATION:-10000000}"
+FFMPEG_RW_TIMEOUT="${FFMPEG_RW_TIMEOUT:-10000000}"
 
 has_tty() {
   [ -r /dev/tty ] && [ -w /dev/tty ] && { : < /dev/tty; } 2>/dev/null
@@ -182,6 +185,9 @@ O11_HOST=${O11_UPSTREAM}
 MAX_CLIENTS=${MAX_CLIENTS}
 CLIENT_BUFFER_LIMIT=${CLIENT_BUFFER_LIMIT}
 FFMPEG_LOGLEVEL=${FFMPEG_LOGLEVEL}
+FFMPEG_PROBESIZE=${FFMPEG_PROBESIZE}
+FFMPEG_ANALYZEDURATION=${FFMPEG_ANALYZEDURATION}
+FFMPEG_RW_TIMEOUT=${FFMPEG_RW_TIMEOUT}
 EOF
 
 chmod 0644 "${CONFIG_DIR}/o11.env" "${CONFIG_DIR}/proxy.env"
@@ -199,6 +205,9 @@ const O11_HOST = process.env.O11_HOST || '127.0.0.1:2086';
 const MAX_CLIENTS = parseInt(process.env.MAX_CLIENTS || '0', 10);
 const CLIENT_BUFFER_LIMIT = parseInt(process.env.CLIENT_BUFFER_LIMIT || '8388608', 10);
 const FFMPEG_LOGLEVEL = process.env.FFMPEG_LOGLEVEL || 'warning';
+const FFMPEG_PROBESIZE = process.env.FFMPEG_PROBESIZE || '5000000';
+const FFMPEG_ANALYZEDURATION = process.env.FFMPEG_ANALYZEDURATION || '10000000';
+const FFMPEG_RW_TIMEOUT = process.env.FFMPEG_RW_TIMEOUT || '10000000';
 
 const activeStreams = new Map();
 
@@ -257,6 +266,7 @@ function publicStatus() {
     proxyPort: PROXY_PORT,
     listenHost: LISTEN_HOST,
     upstream: O11_HOST,
+    remux: 'o11-hls-to-clean-mpegts',
     activeStreams: [...activeStreams.entries()].map(([key, state]) => ({
       key,
       clients: state.clients.size,
@@ -270,6 +280,7 @@ function publicStatus() {
 function stopStream(key, state, reason) {
   if (!state || state.stopping) return;
   state.stopping = true;
+  activeStreams.delete(key);
   console.log(`[stop] ${key}: ${reason}`);
 
   if (state.ffmpeg && !state.ffmpeg.killed) {
@@ -308,15 +319,29 @@ function createStream(key, targetM3u8) {
     '-nostdin',
     '-hide_banner',
     '-loglevel', FFMPEG_LOGLEVEL,
+    '-fflags', '+genpts+discardcorrupt',
     '-reconnect', '1',
     '-reconnect_streamed', '1',
     '-reconnect_delay_max', '5',
     '-http_persistent', '0',
-    '-rw_timeout', '10000000',
-    '-timeout', '10000000',
+    '-rw_timeout', FFMPEG_RW_TIMEOUT,
+    '-timeout', FFMPEG_RW_TIMEOUT,
+    '-probesize', FFMPEG_PROBESIZE,
+    '-analyzeduration', FFMPEG_ANALYZEDURATION,
     '-i', targetM3u8,
+    '-map', '0:v:0',
+    '-map', '0:a?',
+    '-sn',
+    '-dn',
     '-c', 'copy',
-    '-copyts',
+    '-bsf:v', 'dump_extra=freq=keyframe',
+    '-mpegts_flags', '+resend_headers',
+    '-pat_period', '0.05',
+    '-sdt_period', '0.5',
+    '-avoid_negative_ts', 'make_zero',
+    '-muxdelay', '0',
+    '-muxpreload', '0',
+    '-flush_packets', '1',
     '-f', 'mpegts',
     'pipe:1'
   ], {
@@ -408,6 +433,11 @@ const server = http.createServer((req, res) => {
 
   const { key, targetM3u8 } = parsed;
   let streamState = activeStreams.get(key);
+
+  if (streamState && streamState.stopping) {
+    activeStreams.delete(key);
+    streamState = null;
+  }
 
   if (!streamState) {
     streamState = createStream(key, targetM3u8);
